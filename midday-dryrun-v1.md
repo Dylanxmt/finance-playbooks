@@ -67,13 +67,17 @@ If ANY match found:
 - Body: one line stating "Kill switch detected. Remove the `TRADING-PAUSED` label to resume."
 - Exit.
 
-## Step 1 — Health Check
+## Step 1 — Health Check (cold-start tolerant)
 
-1. Call Alpaca `get_clock`. If it fails, wait ~30 seconds and retry once. Alpaca on Render can cold-start after idle.
-2. If still failing: standdown email with subject `Midday Brief — [Date] — STANDING DOWN (Alpaca offline)`. Exit.
-3. Call Alpaca `get_account_info`. Verify status/blocked flags as in morning Step 1.
-4. Confirm market is open RIGHT NOW (not just today). If early close or closed: standdown email noting the clock state.
-5. Record baseline metrics: `equity`, `cash`, `last_equity`, `portfolio_value`, `buying_power`.
+The Alpaca MCP on Render's free tier spins down after 15 min idle. Midday is less likely to hit a cold start than morning (only ~2.5 hours since market open), but apply the same 3-attempt pattern defensively:
+
+1. **Attempt 1:** Call Alpaca `get_clock`. If success in <15s, proceed to step 5.
+2. **Attempt 2:** If failed/timeout, wait 30s and retry. If success, proceed.
+3. **Attempt 3:** If failed, wait 60s more and retry. If success, proceed.
+4. **All 3 failed:** standdown email with subject `Midday Brief — [Date] — STANDING DOWN (Alpaca offline after 3 attempts)`. Exit.
+5. Call Alpaca `get_account_info`. Verify status/blocked flags as in morning Step 1.
+6. Confirm market is open RIGHT NOW (not just today). If early close or closed: standdown email noting the clock state.
+7. Record baseline metrics: `equity`, `cash`, `last_equity`, `portfolio_value`, `buying_power`.
 
 ## Step 2 — Parse Morning Brief
 

@@ -39,12 +39,16 @@ EOD does NOT check for the `TRADING-PAUSED` kill switch. The kill switch pauses 
 
 ---
 
-## Step 1 — Health Check
+## Step 1 — Health Check (cold-start tolerant)
 
-1. Call Alpaca `get_clock`. If it fails, wait ~30 seconds and retry once.
-2. If still failing: still produce a report. Set `alpaca_available = false` and continue. The email will note "Alpaca unreachable — report omits live data."
-3. If succeeds: call `get_account_info`. Record baseline: `equity`, `cash`, `last_equity`, `portfolio_value`, `buying_power`.
-4. Record market state — was the market open today? If holiday / closed, note it but still produce a minimal report (no trading activity means a short email, that's fine).
+The Alpaca MCP on Render's free tier may be cold if idle since the last call. Use the 3-attempt pattern. Unlike morning/midday, EOD does NOT standdown on Alpaca failure — it still ships a minimal report.
+
+1. **Attempt 1:** Call Alpaca `get_clock`. If success in <15s, proceed to step 5.
+2. **Attempt 2:** If failed/timeout, wait 30s and retry. If success, proceed.
+3. **Attempt 3:** If failed, wait 60s more and retry. If success, proceed.
+4. **All 3 failed:** Set `alpaca_available = false` and continue. The email will note "Alpaca unreachable after 3 attempts — report omits live data; portfolio reconciliation skipped."
+5. If `alpaca_available`: call `get_account_info`. Record baseline: `equity`, `cash`, `last_equity`, `portfolio_value`, `buying_power`.
+6. Record market state — was the market open today? If holiday / closed, note it but still produce a minimal report (no trading activity means a short email, that's fine).
 
 ## Step 2 — Parse Today's Morning & Midday Emails
 

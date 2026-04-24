@@ -51,18 +51,22 @@ If ANY match found:
 - Body: one line stating "Kill switch detected. Remove the `TRADING-PAUSED` label to resume."
 - Exit.
 
-## Step 1 — Health Check
+## Step 1 — Health Check (cold-start tolerant)
 
-1. Call Alpaca `get_clock`. If it fails, wait ~30 seconds and retry once.
-2. If still failing: standdown email with subject `Morning Brief — [Date] — STANDING DOWN (Alpaca offline)`. Exit.
-3. Call Alpaca `get_account_info`. Verify:
+The Alpaca MCP is hosted on Render's free tier, which spins down after 15 min idle. The morning trigger fires after ~17 hours of overnight idle, so the first call may need 30-60 seconds for cold start. Use this retry pattern:
+
+1. **Attempt 1:** Call Alpaca `get_clock`. If it succeeds in <15s, proceed to step 5.
+2. **Attempt 2:** If attempt 1 failed or timed out, wait 30 seconds and retry `get_clock`. If success, proceed.
+3. **Attempt 3:** If attempt 2 failed, wait 60 more seconds and retry `get_clock` one final time. If success, proceed.
+4. **All 3 failed:** standdown email with subject `Morning Brief — [Date] — STANDING DOWN (Alpaca offline after 3 attempts, ~105s budget exhausted — likely Render service down or extended cold start)`. Exit.
+5. Call Alpaca `get_account_info`. Verify:
    - `status == "ACTIVE"`
    - `trading_blocked == false`
    - `account_blocked == false`
    - `trade_suspended_by_user == false`
-4. If any fails: standdown email describing which check failed. Exit.
-5. Call `get_calendar` for today. If market is closed the whole day (holiday), standdown email with subject `Morning Brief — [Date] — Market closed`.
-6. Record baseline metrics: `equity`, `cash`, `last_equity`, `portfolio_value`, `buying_power`, `non_marginable_buying_power`.
+6. If any fails: standdown email describing which check failed. Exit.
+7. Call `get_calendar` for today. If market is closed the whole day (holiday), standdown email with subject `Morning Brief — [Date] — Market closed`.
+8. Record baseline metrics: `equity`, `cash`, `last_equity`, `portfolio_value`, `buying_power`, `non_marginable_buying_power`.
 
 ## Step 1.5 — Active Signal Watchlist (from EOD research)
 
