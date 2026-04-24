@@ -235,9 +235,11 @@ Mode: READ-ONLY
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 📊 ACCOUNT
-Equity: $X | Cash: $Y (Z%) | Invested: $A (B%)
-Day P/L: $C (D%) | Since inception (Apr 8): $E (F%)
-Buying power: $G
+Equity: $X  {sparkline}  Day: {sign}{abs%}%
+Cash: $Y (Z%) | Invested: $A (B%)
+Since inception (Apr 8): $E (F%) | Buying power: $G
+
+[Sparkline rendering: pull last 7 trading days from get_portfolio_history. Map each day's equity to one of these blocks based on linear scale (min=▁, max=█): ▁▂▃▄▅▆▇█. Output as 7 chars, one per day, oldest to newest. Example: "▃▄▅▄▆▅▆" for a week ending slightly up. If portfolio_history failed, omit the sparkline entirely.]
 
 📈 SESSION ACTIVITY
 Fills today: [N total logical orders — list each with time, ticker, side, qty, price, source. Source uses the client_order_id prefix convention from Step 4.]
@@ -271,12 +273,28 @@ Day narrative (1-2 sentences on what drove the tape): [brief]
 | Ticker | Qty | Avg Cost | Close | Day Chg | Unrealized P/L | % Equity | 🔔 |
 |--------|-----|----------|-------|---------|----------------|----------|-----|
 
+Position P/L (visual):
+[For each position, render one line: `{emoji} {TICKER}  {bars}{padding} {sign}{abs%}%`
+- emoji: 🟢 if unrealized_plpc > 0, 🔴 if < 0, ⚪ if exactly 0
+- bars: full block "█" repeated round(abs(unrealized_plpc * 100) / 1) times, MAX 10 (one block per 1% gain/loss, capped at 10%)
+- padding: spaces to right-pad bars to 10 chars
+- Example: `🟢 NVDA  ██████████ +10.1%`
+- Example: `🔴 XLF   █          -1.1%`
+Sort by abs(unrealized_plpc) descending — biggest movers first.]
+
 🛑 TRAIL STOP DASHBOARD
 
 | Ticker | Qty | Trail % | Stop | HWM | Headroom |
 |--------|-----|---------|------|-----|----------|
 
-[Any stop with headroom <2% gets a ⚠ mark in Headroom column.]
+Stop headroom (visual):
+[For each position with a trail stop, render: `{TICKER}  [{filled}{empty}] {headroom}% to stop {warn}`
+- filled: full block "█" repeated round(headroom_pct / 0.5) times, MAX 10 (one block per 0.5% headroom, capped at 5%)
+- empty: light shade "░" filling remainder to 10 chars total inside brackets
+- warn: "⚠" if headroom < 2%, else ""
+- Example: `SPY   [█████████░] 4.5% to stop`
+- Example: `XLI   [███░░░░░░░] 1.8% to stop ⚠`
+Sort by headroom ascending — riskiest stops first.]
 
 📓 POST-MORTEMS
 [Any stop-outs today — one block per ticker per Step 5 template. Omit section if no stop-outs.]

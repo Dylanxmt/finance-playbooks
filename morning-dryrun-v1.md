@@ -317,7 +317,19 @@ Signals pending review:
 - [Signal 2]
 - [Signal 3]
 
-Sector rotation (1-day): [ranked list, e.g., "XLK +1.58% > XLE +0.82% > ... > XLRE -0.67%"]
+Sector rotation (1-day):
+[Render each sector as: `{emoji} {TICKER}  {bars}{padding} {sign}{abs%}%`
+- emoji: 🟢 if pct_change > +0.5%, 🔴 if < -0.5%, ⚪ otherwise
+- bars: full block "█" repeated round(abs(pct_change) / 0.3) times, MAX 10 (one block per 0.3%, capped at 3%)
+- padding: spaces to right-pad bars to 10 chars
+- Sort best-to-worst (top performer first)
+- Example:
+  🟢 XLK  ██████████ +1.58%
+  🟢 XLE  ███        +0.82%
+  ⚪ XLB  ▏          +0.17%
+  🔴 XLF  ▏          -0.24%
+  🔴 XLRE ██         -0.67%]
+
 Interpretation: [one line reading of the pair analysis]
 
 📁 PORTFOLIO SNAPSHOT
@@ -325,6 +337,20 @@ Interpretation: [one line reading of the pair analysis]
 | Ticker | Qty | Avg Cost | Current | Unrealized P/L | % Equity | Stop Dist | 🔔 |
 |--------|-----|----------|---------|----------------|----------|-----------|-----|
 | ...    |     |          |         |                |          |           | EARN if within 5d |
+
+Position P/L (visual):
+[For each position, render: `{emoji} {TICKER}  {bars}{padding} {sign}{abs%}%`
+- emoji: 🟢 if unrealized_plpc > 0, 🔴 if < 0, ⚪ if exactly 0
+- bars: full block "█" repeated round(abs(unrealized_plpc * 100) / 1) times, MAX 10
+- padding: spaces to right-pad bars to 10 chars
+- Sort by abs(unrealized_plpc) descending]
+
+Stop headroom (visual):
+[For each position, render: `{TICKER}  [{filled}{empty}] {headroom}% to stop {warn}`
+- filled: full block "█" × round(headroom_pct / 0.5), MAX 10
+- empty: "░" filling rest to 10 chars
+- warn: "⚠" if headroom < 2%, else ""
+- Sort by headroom ascending — riskiest first]
 
 Flags:
 - [At-risk positions, if any]
