@@ -145,7 +145,7 @@ Midday doesn't need the full morning market context — just a sanity check that
 
 Pull:
 - SPY, QQQ, IWM, VIX (or VIXY), TLT intraday quote — compare to yesterday's close
-- 2-3 headlines: `mcp__yahoo-finance__get_stock_news` for SPY, fallback to QQQ if empty
+- 2-3 headlines via `WebSearch: "stock market news intraday {YYYY-MM-DD}"` (Yahoo MCP not enabled in trigger context)
 
 Note in the email using these three labels (pick exactly one):
 - **Confirms** — SPY % change vs. yesterday's close has the SAME sign as morning's expected direction. Any magnitude in the expected direction is confirmation. This is the default "tape is cooperating" reading.

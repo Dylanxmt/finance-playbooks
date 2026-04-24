@@ -98,7 +98,7 @@ Compute:
 - **Invested %** = position_market_value / equity
 - **Largest position %** = max(market_value) / equity — flag if >12%
 - **Stops-at-risk**: positions where `(current_price - stop_price) / current_price < 0.02` → within 2% of stop
-- **Earnings proximity**: for each holding, call `mcp__yahoo-finance__get_stock_earnings` — flag any position with earnings within 5 trading days with `🔔 EARN`
+- **Earnings proximity**: for each holding, run a `WebSearch` for `"{TICKER} Q[1-4] earnings date 2026"` — flag any position with earnings within 5 trading days with `🔔 EARN`. (Yahoo/financial-datasets MCPs aren't enabled in the trigger context; WebSearch is reliable enough for date lookups.)
 - **Sector map** (assign each holding to a category):
   - Core index: SPY, VOO, IVV
   - Large-cap tech: NVDA, META, MSFT, GOOGL, AMZN, AAPL, AMD, TSLA
@@ -119,11 +119,13 @@ Compute:
 
 Pull snapshots for: SPY, QQQ, IWM, TLT, GLD, DXY (or UUP as proxy). If VIX or VIXY is available, include it.
 
-Fetch news using this **explicit fallback chain** (try in order, stop when 3 usable headlines are found):
-1. `mcp__tradingview__financial_news` → if returns 0 items or errors, continue
-2. `mcp__yahoo-finance__get_stock_news` for SPY → top 3
-3. `mcp__yahoo-finance__get_stock_news` for QQQ → top 3 if SPY feed was empty
-4. If all three produce nothing, record `news_feed = empty` and note in the email: "No fresh market news retrievable — tape read is price-only."
+Fetch news via `WebSearch` (Yahoo/TradingView MCPs aren't enabled in the trigger context). Run TWO searches in parallel and synthesize:
+1. `WebSearch: "stock market news today {YYYY-MM-DD}"` — broad market summary
+2. `WebSearch: "{specific catalyst}"` ONLY if Step 1 surfaces a named event (Fed meeting, CPI print, earnings cluster, geopolitical event) — drill in for context
+
+If Step 1 returns nothing useful, record `news_feed = empty` and note in the email: "No fresh market news retrievable — tape read is price-only."
+
+Future migration path: if richer data is needed, enable Yahoo Finance / TradingView / FRED MCPs in the trigger config and update this step accordingly.
 
 Derive 3–5 plain-English signals. Examples of what "a signal" looks like:
 - "10yr yield -12bp overnight on soft CPI print (2.8% vs 3.0% est)"
@@ -137,8 +139,8 @@ If nothing material is happening, note that explicitly: "quiet tape, no fresh ca
 
 For each existing holding, check:
 - Latest quote vs. trail stop → headroom %
-- News in last 24h via `mcp__yahoo-finance__get_stock_news`
-- Earnings within 5 trading days via `mcp__yahoo-finance__get_stock_earnings` — flag this name for tighter risk management or avoidance of top-ups (result may already be cached from Step 2's earnings-proximity sweep — reuse if so)
+- News in last 24h via `WebSearch: "{TICKER} stock news {YYYY-MM-DD}"` — only run for positions with notable price moves (>2% intraday) or known event proximity; skip for boring positions to save search budget
+- Earnings within 5 trading days — reuse the earnings dates already gathered in Step 2's earnings-proximity sweep (do NOT duplicate the search)
 
 Flag to the email:
 - Any position within 2% of its stop ("at-risk")
