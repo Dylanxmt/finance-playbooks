@@ -415,14 +415,38 @@ Reason for standdown: [specific — e.g., "all 4 candidates failed guardrails: 2
 Next scheduled run: Midday Portfolio Check at 12:00 PM ET.
 ```
 
-## Step 11 — Create Gmail Draft
+## Step 11 — Create Gmail Draft (dual-format)
+
+### Construct HTML body
+
+Build an HTML version of the email body that mirrors the plaintext sections from Step 10 with proper visual styling. Use the visual conventions in Appendix D. The HTML body should include:
+- Section headers as styled `<h2>` (per Appendix D)
+- Account summary as a styled box
+- Portfolio snapshot as a real `<table>` with color-coded P/L cells
+- Position P/L visual rendered with HTML/CSS bars (per Appendix D)
+- Sector rotation as styled bars (use the same horizontal-bar pattern, color-coded by sign)
+- Stop headroom gauges as HTML bars (red <2%, amber 2-3%, green >3%)
+- Trade rationale blocks as styled "cards" with 🎯/💡/✅/🔬/📏/🛑/🚫 sections clearly delineated
+- Same emoji section anchors as plaintext
+
+### Draft creation
 
 Call Gmail `create_draft` with:
 - **To:** `{{RECIPIENT_EMAIL}}`
 - **Subject:** per Step 10
-- **Body:** per Step 10 — **MUST be plain text**, not HTML. The midday agent parses this body via `plaintextBody` and HTML-only bodies will be unparseable. Preserve the emoji markers (📊 🌍 📁 🔔 🧭 💼 🗑️ 🛑) — midday uses them as section anchors.
+- **body:** the plaintext body per Step 10. **MUST remain plain text** — midday parses this via `plaintextBody`. Preserve the emoji markers (📊 🌍 📁 🔔 🧭 💼 🗑️ 🛑) — midday uses them as section anchors.
+- **htmlBody:** the styled HTML body constructed above. This is what Dylan sees rendered in Gmail.
 
-If Gmail MCP fails: log the full email body to the trigger's run output so Dylan can find it in the Anthropic trigger logs at claude.ai/code/scheduled.
+Both fields are required.
+
+### Failure handling for create_draft
+
+If `create_draft` returns an error specifically related to the htmlBody:
+1. Retry once WITHOUT the htmlBody parameter, sending only the plaintext `body`.
+2. Note in the trigger run log: "HTML body rejected; sent plaintext only."
+3. Do not let HTML failure block the report.
+
+If Gmail MCP fails entirely: log the full plaintext body to the trigger's run output so Dylan can find it in the Anthropic trigger logs at claude.ai/code/scheduled.
 
 ## Step 12 — Completion
 
@@ -472,6 +496,85 @@ Example: `morning-2026-04-23-XLK-open-001` for morning's first new-position on X
 When placing the corresponding trail stop for a new position, use `authority = stop`: `morning-2026-04-23-XLK-stop-001`.
 
 EOD reconciliation depends on this format. Trail stops placed with the legacy `protect-*` prefix (from earlier sessions) continue to work — EOD attributes them as mechanical exits.
+
+## Appendix D — HTML Visual Conventions (for htmlBody)
+
+Use these consistently. Inline styles only (Gmail strips `<style>` blocks).
+
+### Color tokens
+- Positive: `color: #16a34a` (green) | Negative: `color: #dc2626` (red) | Neutral: `color: #6b7280` (gray) | Warning: `color: #eab308` (amber)
+- Section header dark: `color: #1e293b` | Accent blue: `#3b82f6`
+
+### Section header
+```html
+<h2 style="font-family:Arial,sans-serif;color:#1e293b;border-bottom:2px solid #3b82f6;padding-bottom:4px;margin-top:24px;">📊 Section Title</h2>
+```
+
+### Account summary box
+```html
+<div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:16px;margin:12px 0;font-family:Arial,sans-serif;">
+  <div style="font-size:24px;font-weight:bold;">$101,500</div>
+  <div style="color:#16a34a;font-size:16px;">Day: +$640 (+0.60%)</div>
+  <div style="color:#6b7280;margin-top:4px;">Cash: $X (Y%) | Invested: $A (B%) | Buying Power: $G</div>
+</div>
+```
+
+### Standard table (portfolio, trail stops, reconciliation)
+```html
+<table style="width:100%;border-collapse:collapse;font-family:Arial,sans-serif;font-size:14px;margin:8px 0;">
+  <tr style="background:#1e293b;color:white;">
+    <th style="padding:8px;text-align:left;">Ticker</th>
+    <th style="padding:8px;text-align:right;">Qty</th>
+    <th style="padding:8px;text-align:right;">P/L</th>
+  </tr>
+  <!-- alternate row backgrounds: #ffffff and #f8fafc -->
+  <tr style="background:#ffffff;">
+    <td style="padding:8px;">SPY</td>
+    <td style="padding:8px;text-align:right;">22</td>
+    <td style="padding:8px;text-align:right;color:#16a34a;">+$612</td>
+  </tr>
+</table>
+```
+
+### Horizontal bar (P/L, sector rotation, stop headroom)
+Width = `min(abs(value) * scale, 100)` percent. Color = green if positive, red if negative, color-graded for stop headroom (red <2%, amber 2-3%, green >3%).
+```html
+<div style="display:flex;align-items:center;gap:8px;font-family:Arial,sans-serif;font-size:14px;margin:2px 0;">
+  <span style="display:inline-block;width:60px;font-weight:bold;">NVDA</span>
+  <div style="flex:1;background:#f1f5f9;height:14px;border-radius:2px;overflow:hidden;max-width:300px;">
+    <div style="width:[N]%;height:100%;background:#16a34a;"></div>
+  </div>
+  <span style="color:#16a34a;font-weight:bold;width:70px;text-align:right;">+10.4%</span>
+</div>
+```
+
+### Trade rationale card
+```html
+<div style="background:#fefce8;border-left:4px solid #eab308;border-radius:4px;padding:12px 16px;margin:12px 0;font-family:Arial,sans-serif;">
+  <div style="font-weight:bold;font-size:15px;color:#1e293b;">═══ TRADE #1 OF 3 — [AUTHORITY: c] ═══</div>
+  <div style="margin-top:4px;">Ticker: <strong>SPY</strong> | Side: <strong>Sell</strong> | Qty: 7 | Limit: $708 | Est. proceeds: $4,956</div>
+  <div style="margin-top:8px;"><strong>🎯 SIGNAL:</strong> [text]</div>
+  <div><strong>💡 THESIS:</strong> [text]</div>
+  <div><strong>✅ WHY:</strong> [text]</div>
+  <div><strong>🔬 SIGNAL CONFIRMATION:</strong> [text or omit]</div>
+  <div><strong>📏 SIZE:</strong> [text]</div>
+  <div><strong>🛑 STOP:</strong> [text]</div>
+  <div><strong>🚫 DISQUALIFIERS:</strong> [text]</div>
+</div>
+```
+
+### Body wrapper
+```html
+<body style="font-family:Arial,sans-serif;max-width:720px;margin:0 auto;padding:16px;">
+  <!-- all sections -->
+</body>
+```
+
+### Rules
+- Inline styles only — no `<style>` blocks, no JS, no external CSS
+- No external images (charts deferred)
+- Mirror plaintext section order exactly so the formats are comparable
+- Preserve emoji — Gmail renders natively
 
 ## Appendix C — Jargon Glossary (define on first use in email)
 

@@ -259,14 +259,36 @@ To execute, reply to this thread or open an interactive Claude session.
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ```
 
-## Step 9 — Create Gmail Draft
+## Step 9 — Create Gmail Draft (dual-format)
+
+### Construct HTML body
+
+Build an HTML version of the email body that mirrors the plaintext sections from Step 8 with proper visual styling. Use the visual conventions in Appendix D (same conventions as morning playbook). The HTML body should include:
+- Section headers as styled `<h2>`
+- Account summary as a styled box
+- Position check as a real `<table>` with color-coded intraday cells
+- Stop headroom gauges as HTML bars (red <2%, amber 2-3%, green >3%)
+- Trade rationale "card" if any trades proposed
+- Same emoji section anchors as plaintext (📊 🔄 🌍 🧭 📁 ⚡ 💼 🗑️ 💤)
+
+### Draft creation
 
 Call Gmail `create_draft` with:
 - **To:** `{{RECIPIENT_EMAIL}}`
 - **Subject:** per Step 8
-- **Body:** per Step 8
+- **body:** the plaintext body per Step 8. **MUST remain plain text** — EOD parses this via `plaintextBody`.
+- **htmlBody:** the styled HTML body constructed above.
 
-If Gmail MCP fails: log the full email body to the trigger's run output.
+Both fields are required.
+
+### Failure handling for create_draft
+
+If `create_draft` returns an error specifically related to the htmlBody:
+1. Retry once WITHOUT the htmlBody parameter, sending only the plaintext `body`.
+2. Note "HTML body rejected; sent plaintext only" in the trigger run log.
+3. Do not let HTML failure block the draft.
+
+If Gmail MCP fails entirely: log the full plaintext body to the trigger's run output.
 
 ## Step 10 — Completion
 
@@ -315,6 +337,64 @@ midday-{YYYY-MM-DD}-{ticker}-{authority}-{seq}
 - Midday tightens via `replace_order_by_id`: new order gets `midday-2026-04-23-XLK-tighten-001` (2.5% trail)
 
 EOD's reconciliation reads the tightening as a midday action, preserving clean attribution.
+
+## Appendix D — HTML Visual Conventions (for htmlBody)
+
+Same conventions as the morning playbook's Appendix D. Color tokens:
+- Positive: `#16a34a` (green) | Negative: `#dc2626` (red) | Neutral: `#6b7280` (gray) | Warning: `#eab308` (amber)
+- Section header dark: `#1e293b` | Accent blue: `#3b82f6`
+
+### Section header
+```html
+<h2 style="font-family:Arial,sans-serif;color:#1e293b;border-bottom:2px solid #3b82f6;padding-bottom:4px;margin-top:24px;">📊 Section Title</h2>
+```
+
+### Account summary box (compact for midday — single line of metrics)
+```html
+<div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:12px 16px;margin:12px 0;font-family:Arial,sans-serif;">
+  <div style="font-size:20px;font-weight:bold;">$101,606</div>
+  <div style="color:#16a34a;font-size:14px;">Intraday: +$627 (+0.62%)</div>
+  <div style="color:#6b7280;font-size:13px;margin-top:4px;">Cash: $46,502 (45.8%) | Invested: $55,105 (54.2%)</div>
+</div>
+```
+
+### Standard table (position check)
+```html
+<table style="width:100%;border-collapse:collapse;font-family:Arial,sans-serif;font-size:14px;margin:8px 0;">
+  <tr style="background:#1e293b;color:white;">
+    <th style="padding:8px;text-align:left;">Ticker</th>
+    <th style="padding:8px;text-align:right;">Intraday</th>
+    <th style="padding:8px;text-align:right;">Stop Headroom</th>
+  </tr>
+  <tr style="background:#ffffff;">
+    <td style="padding:8px;">NVDA</td>
+    <td style="padding:8px;text-align:right;color:#16a34a;">+4.75%</td>
+    <td style="padding:8px;text-align:right;color:#16a34a;">4.63%</td>
+  </tr>
+</table>
+```
+
+### Stop headroom gauge
+Width = `min(headroom * 20, 100)` percent. Color:
+- `#dc2626` (red) if headroom < 2%
+- `#eab308` (amber) if 2% ≤ headroom < 3%
+- `#16a34a` (green) if headroom ≥ 3%
+
+### Standdown / monitoring-only emails
+Keep visuals lighter when the email is monitoring-only — the standardized account box + position-check table is sufficient. No need to render a trade-rationale card if no trades proposed.
+
+### Body wrapper
+```html
+<body style="font-family:Arial,sans-serif;max-width:720px;margin:0 auto;padding:16px;">
+  <!-- all sections -->
+</body>
+```
+
+### Rules
+- Inline styles only — no `<style>` blocks, no JS
+- No external images
+- Mirror plaintext section order exactly
+- Preserve emoji
 
 ## Appendix C — Parsing the Morning Email (implementation notes)
 

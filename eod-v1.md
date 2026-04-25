@@ -320,7 +320,7 @@ Next scheduled run: Morning Trading Plan, tomorrow 9:00 AM ET.
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ```
 
-## Step 8 — Create Gmail Draft
+## Step 8 — Create Gmail Draft (dual-format)
 
 ### Pre-flight: SIGNAL_RESULT block validation
 
@@ -333,18 +333,39 @@ If Step 6 produced a SIGNAL_RESULT block, validate BEFORE calling `create_draft`
 - Opening delimiter is exactly `<!-- SIGNAL_RESULT_START` on its own line
 - Closing delimiter is exactly `SIGNAL_RESULT_END -->` on its own line
 
-**If ANY check fails, omit the entire block.** A partial or malformed block will break morning's Step 1.5 parser and produce silent signal errors. Better to emit no block and let morning treat it as "no fresh signal available."
+**If ANY check fails, omit the entire block from BOTH bodies.** A partial or malformed block will break morning's Step 1.5 parser and produce silent signal errors.
+
+### Construct HTML body
+
+Build an HTML version of the email body that mirrors the plaintext sections from Step 7 but renders as a styled document. Use the visual conventions in Appendix D. Include the `<!-- SIGNAL_RESULT_START ... -->` block in the HTML body verbatim too — HTML comments survive HTML rendering invisibly and provide a redundant copy in case future tooling parses the HTML body instead of plaintext.
+
+The HTML body should include:
+- Section headers with the emoji + styled `<h2>` (per Appendix D)
+- Account summary as a styled box (Appendix D's "summary box" pattern)
+- Portfolio snapshot as a real `<table>` with color-coded P/L cells
+- Position P/L visual rendered with HTML/CSS bars (rather than Unicode blocks) — see Appendix D
+- Trail stop dashboard as a styled `<table>` with color-coded headroom cells (red <2%, amber 2-3%, green >3%)
+- Signal research as a styled "card" div
+- Same emoji section anchors as plaintext (📊 📈 📋 🌍 📁 🛑 📓 🔬) so it's visually familiar
 
 ### Draft creation
 
 Call Gmail `create_draft` with:
 - **To:** `{{RECIPIENT_EMAIL}}`
 - **Subject:** per Step 7
-- **Body:** per Step 7 — **MUST be plain text**, not HTML. The next morning agent's Step 1.5 parses this body via `plaintextBody`, especially the `<!-- SIGNAL_RESULT_START ... -->` block. HTML-only bodies will be unparseable.
+- **body:** the plaintext body per Step 7. **MUST remain plain text** — this is the load-bearing contract with morning's parser via `plaintextBody`.
+- **htmlBody:** the styled HTML body constructed above. This is what Dylan sees rendered in Gmail.
 
-The SIGNAL_RESULT block must be preserved EXACTLY — same field labels, same delimiters. This is the load-bearing contract with morning.
+Both fields are required.
 
-If Gmail MCP fails: log the full email body to the trigger's run output so Dylan can find it in the Anthropic trigger logs.
+### Failure handling for create_draft
+
+If `create_draft` returns an error specifically related to the htmlBody (malformed HTML, validation rejection, etc.):
+1. Retry once WITHOUT the htmlBody parameter, sending only the plaintext `body`.
+2. Note in the trigger run log: "HTML body rejected; sent plaintext only."
+3. Do not let HTML failure block the report from shipping.
+
+If Gmail MCP fails entirely: log the full plaintext body to the trigger's run output so Dylan can find it in the Anthropic trigger logs.
 
 ## Step 9 — Completion
 
@@ -403,6 +424,101 @@ Fields (all required when a block is emitted):
 - `FINDING_SUMMARY`: one sentence summary of the investigation
 
 The block's delimiters are HTML comments so they render invisibly in HTML clients but survive plaintext extraction. Preserve `<!-- SIGNAL_RESULT_START` and `SIGNAL_RESULT_END -->` exactly.
+
+## Appendix D — HTML Visual Conventions (for htmlBody)
+
+Use these consistently across all sections. Inline styles (no `<style>` blocks — Gmail strips those).
+
+### Color tokens
+- Positive values (gains, %s up): `color: #16a34a` (green)
+- Negative values (losses, %s down): `color: #dc2626` (red)
+- Neutral / info gray: `color: #6b7280`
+- Warning amber: `color: #eab308`
+- Section header dark: `color: #1e293b`
+- Accent blue (header underline): `#3b82f6`
+
+### Section header
+```html
+<h2 style="font-family:Arial,sans-serif;color:#1e293b;border-bottom:2px solid #3b82f6;padding-bottom:4px;margin-top:24px;">📊 Section Title</h2>
+```
+
+### Account summary box
+```html
+<div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:16px;margin:12px 0;font-family:Arial,sans-serif;">
+  <div style="font-size:24px;font-weight:bold;">$101,584.58 <span style="font-size:14px;font-weight:normal;color:#6b7280;">(7-day curve: ▃█▇▃▅▁▃)</span></div>
+  <div style="color:#16a34a;font-size:16px;">Day: +$640 (+0.60%)</div>
+  <div style="color:#16a34a;font-size:14px;">Since Inception (Apr 8): +$1,584.58 (+1.58%)</div>
+  <div style="color:#6b7280;margin-top:4px;">Cash: $46,501 (45.8%) | Invested: $55,083 (54.2%) | Buying Power: $148,086</div>
+</div>
+```
+
+### Standard table
+```html
+<table style="width:100%;border-collapse:collapse;font-family:Arial,sans-serif;font-size:14px;margin:8px 0;">
+  <thead>
+    <tr style="background:#1e293b;color:white;">
+      <th style="padding:8px;text-align:left;">Ticker</th>
+      <th style="padding:8px;text-align:right;">Qty</th>
+      <th style="padding:8px;text-align:right;">Close</th>
+      <th style="padding:8px;text-align:right;">P/L</th>
+    </tr>
+  </thead>
+  <tbody>
+    <!-- Alternate row backgrounds: #ffffff and #f8fafc -->
+    <tr style="background:#ffffff;">
+      <td style="padding:8px;">SPY</td>
+      <td style="padding:8px;text-align:right;">22</td>
+      <td style="padding:8px;text-align:right;">$714.05</td>
+      <td style="padding:8px;text-align:right;color:#16a34a;">+$612.14</td>
+    </tr>
+  </tbody>
+</table>
+```
+
+### P/L bar (HTML version of plaintext Unicode bar)
+Render each position's P/L as a horizontal styled `<div>` with width proportional to `abs(unrealized_plpc * 10)` percent, max 100%. Positive = green fill, negative = red fill.
+
+```html
+<div style="display:flex;align-items:center;gap:8px;font-family:Arial,sans-serif;font-size:14px;margin:2px 0;">
+  <span style="display:inline-block;width:50px;font-weight:bold;">NVDA</span>
+  <div style="flex:1;background:#f1f5f9;height:14px;border-radius:2px;overflow:hidden;max-width:300px;">
+    <div style="width:100%;height:100%;background:#16a34a;"></div>
+  </div>
+  <span style="color:#16a34a;font-weight:bold;width:60px;text-align:right;">+14.58%</span>
+</div>
+```
+
+### Stop headroom gauge
+Same pattern as P/L bar but use color thresholds: red bar if <2%, amber if 2-3%, green if >3%.
+
+### Signal research card
+```html
+<div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;padding:16px;margin:12px 0;font-family:Arial,sans-serif;">
+  <div style="font-size:16px;font-weight:bold;color:#1e40af;">🔬 Signal Research: [SIGNAL_NAME]</div>
+  <div style="color:#374151;margin-top:8px;font-style:italic;">[Hypothesis]</div>
+  <div style="margin-top:12px;">
+    <span style="font-weight:bold;">Performance:</span> X/5 &nbsp;|&nbsp;
+    <span style="font-weight:bold;">Creativity:</span> X/5 &nbsp;|&nbsp;
+    <span style="font-weight:bold;color:[#16a34a for PROMOTE / #6b7280 for REVIEW / #dc2626 for DROP];">[DECISION]</span>
+  </div>
+  <div style="color:#374151;margin-top:8px;">[FINDING_SUMMARY]</div>
+</div>
+```
+
+### Body wrapper
+Wrap the entire HTML body in a max-width container so it renders cleanly in wide email windows:
+```html
+<body style="font-family:Arial,sans-serif;max-width:720px;margin:0 auto;padding:16px;">
+  <!-- all sections here -->
+</body>
+```
+
+### Rendering rules
+- **No external images** unless explicitly added (chart embedding deferred — see project memory)
+- **No `<style>` blocks** — Gmail strips them; use inline styles only
+- **No JavaScript** — Gmail strips it
+- **Mirror the plaintext section order exactly** — easier for Dylan to compare formats if he wants
+- **Preserve emoji in HTML** — Gmail renders them as native emoji
 
 ---
 
