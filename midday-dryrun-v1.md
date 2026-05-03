@@ -67,17 +67,32 @@ If ANY match found:
 - Body: one line stating "Kill switch detected. Remove the `TRADING-PAUSED` label to resume."
 - Exit.
 
-## Step 1 — Health Check (cold-start tolerant)
+## Step 1 — Health Check (discovery-tolerant)
 
-The Alpaca MCP on Render's free tier spins down after 15 min idle. Midday is less likely to hit a cold start than morning (only ~2.5 hours since market open), but apply the same 3-attempt pattern defensively:
+The Alpaca MCP connector lives behind two layers: (a) the Render-hosted MCP server itself, and (b) the Anthropic agent runtime's discovery / tool-registration layer. UptimeRobot keeps the Render dyno warm (verified 2026-04-27 — initialize handshake responds in ~140ms), so the dominant failure mode is **runtime discovery taking longer than the first attempt**, not Render cold-start. Midday is less likely than morning to hit either failure (UptimeRobot has been pinging continuously, and the morning agent already exercised the connector ~3h earlier), but apply the same procedure defensively.
 
-1. **Attempt 1:** Call Alpaca `get_clock`. If success in <15s, proceed to step 5.
-2. **Attempt 2:** If failed/timeout, wait 30s and retry. If success, proceed.
-3. **Attempt 3:** If failed, wait 60s more and retry. If success, proceed.
-4. **All 3 failed:** standdown email with subject `Midday Brief — [Date] — STANDING DOWN (Alpaca offline after 3 attempts)`. Exit.
-5. Call Alpaca `get_account_info`. Verify status/blocked flags as in morning Step 1.
-6. Confirm market is open RIGHT NOW (not just today). If early close or closed: standdown email noting the clock state.
-7. Record baseline metrics: `equity`, `cash`, `last_equity`, `portfolio_value`, `buying_power`.
+**Phase A — wait for discovery (priming).**
+1. Sleep 45 seconds before any Alpaca call. Connector tools may not be registered in the runtime's tool index until discovery completes; calling them too early returns "no matching tools" and burns the budget.
+2. Call `ToolSearch` with query `"alpaca get_clock"`, max_results 5. Look for `mcp__alpaca__get_clock` in the returned schema list.
+3. If found → proceed to Phase B.
+4. If not found, sleep 30s and retry ToolSearch. Repeat up to 4 more times (5 ToolSearch attempts total, ~165s elapsed since start).
+5. If all 5 ToolSearch attempts fail to surface Alpaca tools, send a standdown email with subject:
+   `Midday Brief — [Date] — STANDING DOWN (Alpaca tools never registered after 5 discovery attempts, ~210s — runtime/connector issue, NOT Render)`
+   Body must include: each ToolSearch query string and the result count it returned, plus the line "Verify https://alpaca-mcp-server-8zw5.onrender.com/mcp responds and reconnect connector at https://claude.ai/settings/connectors before the next scheduled run." Exit.
+
+**Phase B — probe Alpaca.**
+6. Call `mcp__alpaca__get_clock`. Allow up to 30s.
+7. If it fails or times out, wait 30s and retry once.
+8. If both attempts fail *despite tools being registered*, send a standdown email with subject:
+   `Midday Brief — [Date] — STANDING DOWN (get_clock failed twice despite registered tools — likely Alpaca API or auth, not connector)`
+   Body must include the error text from each attempt. Exit.
+
+**Phase C — verify account.**
+9. Call `get_account_info`. Verify status/blocked flags as in morning Step 1 (Phase C).
+10. Confirm market is open RIGHT NOW (not just today). If early close or closed: standdown email noting the clock state.
+11. Record baseline metrics: `equity`, `cash`, `last_equity`, `portfolio_value`, `buying_power`.
+
+**Total budget:** ~210s discovery + ~60s probes = ~4.5 min worst case before standdown. Agent fires 12:00 PM ET — no hard deadline, so this is comfortably within budget.
 
 ## Step 2 — Parse Morning Brief
 

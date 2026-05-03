@@ -39,16 +39,27 @@ EOD does NOT check for the `TRADING-PAUSED` kill switch. The kill switch pauses 
 
 ---
 
-## Step 1 — Health Check (cold-start tolerant)
+## Step 1 — Health Check (discovery-tolerant)
 
-The Alpaca MCP on Render's free tier may be cold if idle since the last call. Use the 3-attempt pattern. Unlike morning/midday, EOD does NOT standdown on Alpaca failure — it still ships a minimal report.
+The Alpaca MCP connector lives behind two layers: (a) the Render-hosted MCP server itself, and (b) the Anthropic agent runtime's discovery / tool-registration layer. UptimeRobot keeps the Render dyno warm (verified 2026-04-27 — initialize handshake responds in ~140ms), so the dominant failure mode is **runtime discovery taking longer than the first attempt**, not Render cold-start. Unlike morning/midday, EOD does NOT standdown on Alpaca failure — it still ships a minimal report. Failures at any phase below set `alpaca_available = false` and skip the remaining phases.
 
-1. **Attempt 1:** Call Alpaca `get_clock`. If success in <15s, proceed to step 5.
-2. **Attempt 2:** If failed/timeout, wait 30s and retry. If success, proceed.
-3. **Attempt 3:** If failed, wait 60s more and retry. If success, proceed.
-4. **All 3 failed:** Set `alpaca_available = false` and continue. The email will note "Alpaca unreachable after 3 attempts — report omits live data; portfolio reconciliation skipped."
-5. If `alpaca_available`: call `get_account_info`. Record baseline: `equity`, `cash`, `last_equity`, `portfolio_value`, `buying_power`.
-6. Record market state — was the market open today? If holiday / closed, note it but still produce a minimal report (no trading activity means a short email, that's fine).
+**Phase A — wait for discovery (priming).**
+1. Sleep 45 seconds before any Alpaca call. Connector tools may not be registered in the runtime's tool index until discovery completes; calling them too early returns "no matching tools" and burns the budget.
+2. Call `ToolSearch` with query `"alpaca get_clock"`, max_results 5. Look for `mcp__alpaca__get_clock` in the returned schema list.
+3. If found → proceed to Phase B.
+4. If not found, sleep 30s and retry ToolSearch. Repeat up to 4 more times (5 ToolSearch attempts total, ~165s elapsed since start).
+5. If all 5 ToolSearch attempts fail to surface Alpaca tools: set `alpaca_available = false`, set `failure_reason = "Alpaca tools never registered after 5 discovery attempts (~210s) — runtime/connector issue, NOT Render"`, and skip to Step 2. The email will note this in place of the live data section.
+
+**Phase B — probe Alpaca.**
+6. Call `mcp__alpaca__get_clock`. Allow up to 30s.
+7. If it fails or times out, wait 30s and retry once.
+8. If both attempts fail *despite tools being registered*: set `alpaca_available = false`, set `failure_reason = "get_clock failed twice despite registered tools — likely Alpaca API or auth, not connector"` (include the error text from each attempt), and skip to Step 2.
+
+**Phase C — verify account.**
+9. If `alpaca_available`: call `get_account_info`. Record baseline: `equity`, `cash`, `last_equity`, `portfolio_value`, `buying_power`.
+10. Record market state — was the market open today? If holiday / closed, note it but still produce a minimal report (no trading activity means a short email, that's fine).
+
+**Total budget:** ~210s discovery + ~60s probes = ~4.5 min worst case before falling through to a degraded report. Agent fires 3:55 PM ET — no hard deadline.
 
 ## Step 2 — Parse Today's Morning & Midday Emails
 
