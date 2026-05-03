@@ -463,6 +463,21 @@ If `create_draft` returns an error specifically related to the htmlBody:
 
 If Gmail MCP fails entirely: log the full plaintext body to the trigger's run output so Dylan can find it in the Anthropic trigger logs at claude.ai/code/scheduled.
 
+### Post-create verification (catch silent connector failures)
+
+The Gmail connector has been observed returning a fake-success response from `create_draft` without persisting the draft (incident 2026-05-01 — all three agents reported "Gmail draft created successfully" but no drafts landed in Gmail; suspected root cause was OAuth invalidation following a Google password rotation, leaving the connector returning success silently). Verify before exiting:
+
+1. Capture the `draftId` returned by `create_draft` and the exact `Subject` string you used.
+2. Sleep 5 seconds — Gmail's draft indexing has minor lag.
+3. Call `list_drafts` with `query: "subject:\"<exact subject>\""`, `pageSize: 5`. Treat as a match only if a returned draft's `date` is within the last 5 minutes.
+4. **≥1 matching recent draft:** verification passes. Proceed to Step 12.
+5. **Zero matches:** the connector silently failed. Retry `create_draft` once with identical parameters. Sleep 5s. Re-run the `list_drafts` probe.
+6. **Still zero matches after retry:** output to trigger run log:
+   ```
+   DRAFT_VERIFY_FAILED | subject: <subject> | claimed_id_1: <id1> | claimed_id_2: <id2 or "n/a"> | Gmail connector likely broken — reconnect at https://claude.ai/settings/connectors before next run
+   ```
+   Then EXIT WITH AN ERROR (non-zero). The trigger schedule UI must show RED for this run — green-with-no-draft is the exact failure mode this step exists to surface.
+
 ## Step 12 — Completion
 
 Output a single status line:
