@@ -51,37 +51,77 @@ If ANY match found:
 - Body: one line stating "Kill switch detected. Remove the `TRADING-PAUSED` label to resume."
 - Exit.
 
-## Step 1 — Health Check (discovery-tolerant)
+## Step 1 — Health Check (discovery-tolerant + degraded-mode fallback)
 
-The Alpaca MCP connector lives behind two layers: (a) the Render-hosted MCP server itself, and (b) the Anthropic agent runtime's discovery / tool-registration layer. UptimeRobot keeps the Render dyno warm (verified 2026-04-27 — initialize handshake responds in ~140ms), so the dominant failure mode is **runtime discovery taking longer than the first attempt**, not Render cold-start. Probe for tool availability before calling any tool.
+The Alpaca MCP connector lives behind two layers: (a) the Render-hosted MCP server itself, and (b) the Anthropic agent runtime's discovery / tool-registration layer. UptimeRobot keeps the Render dyno warm (verified 2026-04-27 — initialize handshake responds in ~140ms), so the dominant failure mode is **runtime discovery taking longer than the first attempt**, not Render cold-start.
 
-**Phase A — wait for discovery (priming).**
+**Updated 2026-05-10 (post-May-8 standdown):** Discovery uses exponential backoff (not flat retries), probes Render at the attempt-3 boundary to distinguish "Render down" from "runtime slow," and routes discovery failures to a Yahoo-backed **degraded mode** (Phase D) instead of producing a zero-visibility standdown email. True standdowns are reserved for account-level halts, market-closed days, and the no-fallback-data case.
+
+**Phase A — wait for discovery (priming + exponential backoff).**
 1. Sleep 45 seconds before any Alpaca call. Connector tools may not be registered in the runtime's tool index until discovery completes; calling them too early returns "no matching tools" and burns the budget.
-2. Call `ToolSearch` with query `"alpaca get_clock"`, max_results 5. Look for `mcp__alpaca__get_clock` in the returned schema list.
-3. If found → proceed to Phase B.
-4. If not found, sleep 30s and retry ToolSearch. Repeat up to 4 more times (5 ToolSearch attempts total, ~165s elapsed since start).
-5. If all 5 ToolSearch attempts fail to surface Alpaca tools, send a standdown email with subject:
-   `Morning Brief — [Date] — STANDING DOWN (Alpaca tools never registered after 5 discovery attempts, ~210s — runtime/connector issue, NOT Render)`
-   Body must include: each ToolSearch query string and the result count it returned, plus the line "Verify https://alpaca-mcp-server-8zw5.onrender.com/mcp responds and reconnect connector at https://claude.ai/settings/connectors before the next scheduled run." Exit.
+2. Run up to 7 ToolSearch attempts. Each attempt: query `"select:mcp__alpaca__get_clock"`, `max_results: 1`. If `mcp__alpaca__get_clock` appears in the returned schema list, proceed to Phase B.
+3. Backoff schedule (sleep AFTER a failed attempt, BEFORE the next):
+   - After attempt 1: sleep 10s
+   - After attempt 2: sleep 20s
+   - After attempt 3: **PROBE RENDER** (see sub-step below), then sleep 40s if continuing
+   - After attempt 4: sleep 60s
+   - After attempt 5: sleep 60s
+   - After attempt 6: sleep 60s
+   - After attempt 7: stop. Set `alpaca_available = false`, `failure_class = "discovery_exhausted"`. Go to Phase D.
+4. Discovery budget: 45s priming + ~250s retry = ~5 min worst case. Agent fires 9:00 AM ET, market opens 9:30 AM → ~25 min headroom remains for Steps 2-12 even at worst-case.
+
+**Render probe (sub-step, runs once after attempt 3 fails):**
+Use `WebFetch` on `https://alpaca-mcp-server-8zw5.onrender.com/` with a 15s timeout. Interpret:
+- Any HTTP response (200, 404, 405, 400, 500, etc.) → set `render_status = "up"`. The server is live; runtime hasn't finished tool negotiation. KEEP retrying through attempt 7.
+- Connection refused, DNS error, timeout, or 502/503/504 → set `render_status = "down"`. Stop retrying — set `alpaca_available = false`, `failure_class = "render_down"`. Skip remaining attempts. Go to Phase D.
+- If `WebFetch` is unavailable in this runtime, set `render_status = "unprobed"` and continue retries on the schedule above.
+
+Capture and persist for the email body: `discovery_attempts_made` (1-7), `render_status` ("up" / "down" / "unprobed" / "n/a"), `failure_class`.
 
 **Phase B — probe Alpaca.**
-6. Call `mcp__alpaca__get_clock`. Allow up to 30s.
-7. If it fails or times out, wait 30s and retry once.
-8. If both attempts fail *despite tools being registered*, send a standdown email with subject:
-   `Morning Brief — [Date] — STANDING DOWN (get_clock failed twice despite registered tools — likely Alpaca API or auth, not connector)`
-   Body must include the error text from each attempt. Exit.
+5. Call `mcp__alpaca__get_clock`. Allow up to 30s.
+6. If it fails or times out, wait 30s and retry once.
+7. If both attempts fail *despite tools being registered*: this is a separate failure class — Alpaca API or auth, not connector discovery. Set `alpaca_available = false`, `failure_class = "alpaca_api_error"`. Capture the error text from each attempt. Go to Phase D.
 
 **Phase C — verify account.**
-9. Call `get_account_info`. Verify:
+8. Call `get_account_info`. Verify:
    - `status == "ACTIVE"`
    - `trading_blocked == false`
    - `account_blocked == false`
    - `trade_suspended_by_user == false`
-10. If any check fails: standdown email describing which check failed. Exit.
-11. Call `get_calendar` for today. If market is closed the whole day (holiday), standdown email with subject `Morning Brief — [Date] — Market closed`. Exit.
-12. Record baseline metrics: `equity`, `cash`, `last_equity`, `portfolio_value`, `buying_power`, `non_marginable_buying_power`.
+9. If any check fails: this is a deliberate halt (account itself is blocked) — go to **true standdown**, NOT Phase D. Subject: `Morning Brief — [Date] — STANDING DOWN (account [which check failed])`. Body includes which check failed and the raw account JSON. Exit.
+10. Call `get_calendar` for today. If market is closed the whole day (holiday), true standdown with subject `Morning Brief — [Date] — Market closed`. Exit.
+11. Record baseline metrics: `equity`, `cash`, `last_equity`, `portfolio_value`, `buying_power`, `non_marginable_buying_power`. Set `alpaca_available = true`, `position_source = "alpaca-live"`. Proceed to Step 1.5.
 
-**Total budget:** ~210s discovery + ~60s probes = ~4.5 min worst case before standdown. Agent fires 9:00 AM ET, market opens 9:30 AM ET → 25 min of headroom for the rest of the playbook even at worst case.
+**Phase D — degraded-mode fallback (replaces pure standdown for discovery/probe failures).**
+Entered only when `alpaca_available = false` from Phase A or B. Phase C account-block / market-closed failures bypass this and go to true standdown.
+
+12. Search Gmail: `from:{{RECIPIENT_EMAIL}} subject:"EOD Report" newer_than:5d`. Take the most recent match (yesterday's, in the typical case — extends to 5 days for long weekends / holiday gaps).
+13. Call `get_thread` with `messageFormat: FULL_CONTENT`. Parse the EOD body for:
+    - Portfolio table rows: ticker, qty, avg cost, close price.
+    - Account summary line: `equity`, `cash`, `buying_power` — label these "as of [EOD date]".
+    - The `<!-- SIGNAL_RESULT_START ... SIGNAL_RESULT_END -->` block (if present). This carries straight into Step 1.5's `active_signals[]` — the signal feed is independent of Alpaca.
+14. For each ticker, fetch a current premarket/opening quote:
+    - First try `mcp__yahoo-finance__get_stock_price`.
+    - If that fails or the MCP is unavailable, try `mcp__financial-datasets__get_current_stock_price`.
+    - If both fail for a ticker, mark that row `price_unavailable` and continue.
+15. Compute approximate per-position values:
+    - `position_value ≈ qty × current_price`
+    - `unrealized_pl ≈ (current_price − avg_cost) × qty`
+    - `overnight_change_pct ≈ (current_price / eod_close − 1) × 100`
+16. Compute approximate portfolio total: `approximate_equity ≈ sum(position_values) + cash_from_eod`. Mark `†` and footnote "approximate — Alpaca offline, computed from yesterday's EOD close + premarket quotes. Cash and buying power frozen as of [EOD date]."
+17. Set `position_source = "fallback (yesterday's EOD + premarket quotes)"`. **DEGRADED-MODE CONSTRAINTS:**
+    - Step 1.5 (signal carry-forward) STILL RUNS — signals are independent of Alpaca. Use the EOD email already fetched in step 12.
+    - Skip Step 2's overnight position diff (no live positions to compare; use the fallback data instead).
+    - Step 3 market context still runs (web-based).
+    - Step 4 position-level scan: use Yahoo for the per-ticker price and news; SKIP the trail-stop headroom calculation (no live stops visible). Note "stop headroom unavailable in degraded mode."
+    - Step 5 sector rotation: attempt via Yahoo for the 11 sector ETFs (XLK, XLF, etc.); if Yahoo fails for ≥3 of them, omit the sector-rotation section.
+    - **Skip Step 6 (opportunity scan) and Step 7 (guardrail filter) entirely.** No new-position generation in degraded mode — no live cash, no order plumbing, no way to verify the math.
+    - Step 8 (decision) lands in "STAND DOWN — degraded mode, monitoring only" automatically.
+    - Step 10 (email) renders an info-only report with the Connectivity Status block.
+18. If no recent EOD email is found OR all current-price lookups fail: this is a **true standdown**. Subject: `Morning Brief — [Date] — STANDING DOWN (degraded fallback also failed: [reason])`. Body explains what was tried (EOD email search query and result, ticker count attempted, MCP availability). Exit.
+
+**Total budget worst case:** ~5 min Phase A + ~60s Phase B + ~30s Phase C + ~90s Phase D = ~8 min. Agent fires 9:00 AM ET, market opens 9:30 AM → still ~22 min of headroom even at degraded-mode worst case.
 
 ## Step 1.5 — Active Signal Watchlist (from EOD research)
 
@@ -298,7 +338,24 @@ Ticker: XLU  |  Side: Buy  |  Qty: 60  |  Limit: $82.50  |  Est. cost: $4,950
 
 **Subject format:**
 - If trades proposed: `Morning Trading Plan — [Date Long] — [N] trades proposed`
+- If degraded mode (Phase D): `Morning Brief — [Date Long] — DEGRADED ([failure_class], fallback values from yesterday's EOD + premarket quotes)`
 - If standing down: `Morning Brief — [Date Long] — Standing down ([brief reason])`
+
+**Mode header line (use one):**
+- Normal: `Mode: DRY-RUN`
+- Degraded: `Mode: DRY-RUN-DEGRADED | Source: yesterday's EOD + premarket quotes (Alpaca offline) | Action: VERIFY before next run — see Connectivity Status below`
+
+**Connectivity Status block (include only when degraded):**
+Insert this block immediately after the mode header line:
+```
+🔌 CONNECTIVITY STATUS
+Alpaca: OFFLINE | Failure class: [failure_class] | Discovery attempts: [N]/7 | Render status: [up/down/unprobed]
+- If render_status = up: Runtime/connector issue, NOT Render. Reconnect at https://claude.ai/settings/connectors
+- If render_status = down: Render endpoint unreachable. Check dashboard for alpaca-mcp-server-8zw5
+- If render_status = unprobed: WebFetch unavailable; could not distinguish runtime vs Render
+Position values below are approximate (qty × premarket_quote). Cash/buying-power frozen at [EOD date].
+No new-position proposals in degraded mode — Steps 6-7 skipped.
+```
 
 **Body structure (exact order):**
 
@@ -489,15 +546,34 @@ Exit.
 
 ---
 
-## Appendix A — Standdown Scenarios
+## Appendix A — Standdown vs Degraded vs Trades-Proposed (decision tree)
 
-Create a standdown draft (not a trade draft) when any of:
-1. Kill switch is active (Step 0)
-2. Alpaca unreachable after retry (Step 1)
-3. Account not ACTIVE or blocked (Step 1)
-4. Market closed all day — holiday (Step 1)
-5. Zero candidates pass guardrails (Step 8)
-6. Unrecoverable error at any step — log the error in the draft body
+Three terminal states are NOT the same — pick the right one:
+
+**Trades proposed** (the common active-day path):
+- Step 1 succeeded, ≥1 candidate passed Step 7's guardrails.
+- Subject: `Morning Trading Plan — [Date] — [N] trades proposed`.
+
+**Monitoring / no candidates** (also common):
+- Step 1 succeeded but Step 8 produced zero survivors.
+- Subject: `Morning Brief — [Date] — Standing down (zero candidates passed guardrails)`.
+- Body includes the rejected-candidates section so the standdown is auditable.
+
+**Degraded mode** (Phase D fallback, post-2026-05-10):
+- Trigger: Step 1 Phase A or B failed (discovery exhausted, Render down, or Alpaca API errored), but yesterday's EOD email + premarket quotes were retrievable.
+- Subject: `Morning Brief — [Date] — DEGRADED (...)`.
+- Body includes Connectivity Status block + approximate position values + signals carried from yesterday's EOD.
+- No new-position proposals (degraded data, unreachable order plumbing).
+- Dylan reads the Connectivity Status block and acts on it before the next scheduled run.
+
+**True standdown** (last resort, no portfolio visibility possible):
+1. Kill switch is active (Step 0).
+2. Step 1 Phase C account check failed (account blocked / suspended).
+3. Market closed all day — holiday (Step 1 Phase C).
+4. Step 1 Phase D also failed (no recent EOD email AND no Yahoo/financial-datasets quotes available).
+5. Unrecoverable error at any step — log the error in the draft body.
+
+Pre-2026-05-10 the agent treated discovery failures as standdowns. Post-2026-05-10 those become degraded mode. The May 8 midday standdown pattern ("STANDING DOWN — Alpaca tools never registered after 5 discovery attempts") would now be a DEGRADED report at any agent.
 
 ## Appendix B — Safety Rails
 

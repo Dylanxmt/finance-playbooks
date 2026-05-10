@@ -39,27 +39,71 @@ EOD does NOT check for the `TRADING-PAUSED` kill switch. The kill switch pauses 
 
 ---
 
-## Step 1 — Health Check (discovery-tolerant)
+## Step 1 — Health Check (discovery-tolerant + degraded-mode fallback)
 
-The Alpaca MCP connector lives behind two layers: (a) the Render-hosted MCP server itself, and (b) the Anthropic agent runtime's discovery / tool-registration layer. UptimeRobot keeps the Render dyno warm (verified 2026-04-27 — initialize handshake responds in ~140ms), so the dominant failure mode is **runtime discovery taking longer than the first attempt**, not Render cold-start. Unlike morning/midday, EOD does NOT standdown on Alpaca failure — it still ships a minimal report. Failures at any phase below set `alpaca_available = false` and skip the remaining phases.
+The Alpaca MCP connector lives behind two layers: (a) the Render-hosted MCP server itself, and (b) the Anthropic agent runtime's discovery / tool-registration layer. UptimeRobot keeps the Render dyno warm (verified 2026-04-27 — initialize handshake responds in ~140ms), so the dominant failure mode is **runtime discovery taking longer than the first attempt**, not Render cold-start.
 
-**Phase A — wait for discovery (priming).**
+**EOD has always been degradation-tolerant** (Appendix A: "EOD ships the report even when individual steps fail"). What changes 2026-05-10 is the FAILURE CLASSIFICATION and the FALLBACK DATA SOURCE — instead of just shipping an Alpaca-less email, EOD now distinguishes "runtime slow" from "Render down" via probing, uses exponential backoff for cleaner retry semantics, and pulls today's morning email + Yahoo current quotes for a richer degraded report.
+
+Failures at any phase below set `alpaca_available = false` and skip live-data steps. EOD still ships the report — that contract is unchanged. The patch sharpens the diagnostics that go into the email body.
+
+**Phase A — wait for discovery (priming + exponential backoff).**
 1. Sleep 45 seconds before any Alpaca call. Connector tools may not be registered in the runtime's tool index until discovery completes; calling them too early returns "no matching tools" and burns the budget.
-2. Call `ToolSearch` with query `"alpaca get_clock"`, max_results 5. Look for `mcp__alpaca__get_clock` in the returned schema list.
-3. If found → proceed to Phase B.
-4. If not found, sleep 30s and retry ToolSearch. Repeat up to 4 more times (5 ToolSearch attempts total, ~165s elapsed since start).
-5. If all 5 ToolSearch attempts fail to surface Alpaca tools: set `alpaca_available = false`, set `failure_reason = "Alpaca tools never registered after 5 discovery attempts (~210s) — runtime/connector issue, NOT Render"`, and skip to Step 2. The email will note this in place of the live data section.
+2. Run up to 7 ToolSearch attempts. Each attempt: query `"select:mcp__alpaca__get_clock"`, `max_results: 1`. If `mcp__alpaca__get_clock` appears in the returned schema list, proceed to Phase B.
+3. Backoff schedule (sleep AFTER a failed attempt, BEFORE the next):
+   - After attempt 1: sleep 10s
+   - After attempt 2: sleep 20s
+   - After attempt 3: **PROBE RENDER** (see sub-step below), then sleep 40s if continuing
+   - After attempt 4: sleep 60s
+   - After attempt 5: sleep 60s
+   - After attempt 6: sleep 60s
+   - After attempt 7: stop. Set `alpaca_available = false`, `failure_class = "discovery_exhausted"`. Go to Phase D.
+4. Discovery budget: 45s priming + ~250s retry = ~5 min worst case.
+
+**Render probe (sub-step, runs once after attempt 3 fails):**
+Use `WebFetch` on `https://alpaca-mcp-server-8zw5.onrender.com/` with a 15s timeout. Interpret:
+- Any HTTP response (200, 404, 405, 400, 500, etc.) → set `render_status = "up"`. The server is live; runtime hasn't finished tool negotiation. KEEP retrying through attempt 7.
+- Connection refused, DNS error, timeout, or 502/503/504 → set `render_status = "down"`. Stop retrying — set `alpaca_available = false`, `failure_class = "render_down"`. Skip remaining attempts. Go to Phase D.
+- If `WebFetch` is unavailable in this runtime, set `render_status = "unprobed"` and continue retries on the schedule above.
+
+Capture and persist for the email body: `discovery_attempts_made` (1-7), `render_status`, `failure_class`.
 
 **Phase B — probe Alpaca.**
-6. Call `mcp__alpaca__get_clock`. Allow up to 30s.
-7. If it fails or times out, wait 30s and retry once.
-8. If both attempts fail *despite tools being registered*: set `alpaca_available = false`, set `failure_reason = "get_clock failed twice despite registered tools — likely Alpaca API or auth, not connector"` (include the error text from each attempt), and skip to Step 2.
+5. Call `mcp__alpaca__get_clock`. Allow up to 30s.
+6. If it fails or times out, wait 30s and retry once.
+7. If both attempts fail *despite tools being registered*: set `alpaca_available = false`, `failure_class = "alpaca_api_error"` (include error text). Go to Phase D.
 
 **Phase C — verify account.**
-9. If `alpaca_available`: call `get_account_info`. Record baseline: `equity`, `cash`, `last_equity`, `portfolio_value`, `buying_power`.
-10. Record market state — was the market open today? If holiday / closed, note it but still produce a minimal report (no trading activity means a short email, that's fine).
+8. If `alpaca_available`: call `get_account_info`. Record baseline: `equity`, `cash`, `last_equity`, `portfolio_value`, `buying_power`. Set `position_source = "alpaca-live"`.
+9. Record market state — was the market open today? If holiday / closed, note it but still produce a minimal report.
+10. Proceed to Step 2.
 
-**Total budget:** ~210s discovery + ~60s probes = ~4.5 min worst case before falling through to a degraded report. Agent fires 3:55 PM ET — no hard deadline.
+**Phase D — degraded-mode fallback.**
+Entered only when `alpaca_available = false` from Phase A or B. Phase D produces a degraded EOD report using today's morning email's portfolio snapshot + current quotes. Still ships — true standdown only when fallback also fails.
+
+11. Search Gmail: `from:{{RECIPIENT_EMAIL}} (subject:"Morning Trading Plan" OR subject:"Morning Brief") newer_than:1d`. Take today's match.
+12. Call `get_thread` with `messageFormat: FULL_CONTENT`. Parse the morning body for:
+    - Portfolio table rows: ticker, qty, avg cost, opening price.
+    - Account summary: morning's `equity`, `cash`, `buying_power` (label "as of morning, [time]").
+    - The 9-AM stop-headroom snapshot if rendered (used to estimate which positions were close to stops at open — note these may have stopped out intraday and we have no way to verify).
+13. For each ticker, fetch a current closing-area quote:
+    - First try `mcp__yahoo-finance__get_stock_price`.
+    - If that fails, try `mcp__financial-datasets__get_current_stock_price`.
+    - If both fail, mark row `price_unavailable`.
+14. Compute approximate per-position values:
+    - `position_value ≈ qty × current_price`
+    - `unrealized_pl ≈ (current_price − avg_cost) × qty`
+    - `day_change_pct ≈ (current_price / morning_open − 1) × 100`
+15. Compute approximate equity: `approximate_equity ≈ sum(position_values) + cash_from_morning`. Mark `†` and footnote "approximate — Alpaca offline, computed from this morning's snapshot + current quotes. Cannot detect intraday fills, stop-outs, or cash changes."
+16. Set `position_source = "fallback (today's morning email + current quotes)"`. **DEGRADED-MODE CONSTRAINTS for EOD:**
+    - **Skip Step 4 (Day Reconciliation) entirely** — no fills data without Alpaca.
+    - **Skip Step 5 (Post-Mortems) entirely** — no stop-out detection without Alpaca.
+    - Step 6 (Signal Research) STILL RUNS — web-only, independent of Alpaca. EOD's research deliverable remains intact.
+    - Step 7 (email assembly) renders DEGRADED format with Connectivity Status block and the approximate snapshot.
+    - Morning agent next day will pull DEGRADED EOD's signal block normally; the portfolio snapshot it uses will be approximate. Note this clearly in the email so morning's degraded-mode fallback (which keys off "EOD Report" emails) can detect it via the DEGRADED tag in the subject.
+17. If today's morning email is also missing OR all current-price lookups fail: this is a **true standdown**. Subject: `EOD Report — [Date] — STANDING DOWN (degraded fallback failed: [reason])`. Body explains what was tried. Exit.
+
+**Total budget:** ~5 min Phase A + ~60s Phase B + ~30s Phase C + ~90s Phase D = ~8 min. Agent fires 3:55 PM ET — well within budget regardless of path.
 
 ## Step 2 — Parse Today's Morning & Midday Emails
 
@@ -223,14 +267,19 @@ If no stop-outs today: omit this section entirely.
 
 ## Step 7 — Email Assembly
 
-**Subject template:** `EOD Report — [Date] — [N] positions, [+/-]X.XX%, [stop-out summary], research [outcome]`
+**Subject template (normal):** `EOD Report — [Date] — [N] positions, [+/-]X.XX%, [stop-out summary], research [outcome]`
+
+**Subject template (degraded):** `EOD Report — [Date] — DEGRADED ([failure_class]), [N] positions [†], research [outcome]`
+
+The DEGRADED tag in the subject is load-bearing — tomorrow's morning agent (which pulls "EOD Report" emails for fallback data in its own Phase D) uses the DEGRADED tag to know that the snapshot is approximate, not authoritative.
 
 Fill rules:
 - `[Date]` → short day+date, e.g., `Wed Apr 22, 2026`
-- `[N] positions` → current count from `positions_snapshot_eod`
-- `[+/-]X.XX%` → day P/L percent, signed
-- `[stop-out summary]` → `"no stop-outs"` or `"N stop-out(s)"`
+- `[N] positions` → current count (from `positions_snapshot_eod` if live; from morning email if degraded)
+- `[+/-]X.XX%` → day P/L percent, signed (omit if degraded — no `last_equity`)
+- `[stop-out summary]` → `"no stop-outs"` or `"N stop-out(s)"` (omit if degraded — no fills data)
 - `[outcome]` → one of: `"promoted"` (AUTO-PROMOTE), `"dropped"` (AUTO-DROP), `"needs review"` (NEEDS_REVIEW), `"skipped"` (research_status=skipped)
+- `[failure_class]` (degraded only) → `discovery_exhausted` / `render_down` / `alpaca_api_error`
 
 Examples:
 - `EOD Report — Wed Apr 22, 2026 — 8 positions, +0.30%, 1 stop-out, research needs review`
@@ -242,8 +291,17 @@ Examples:
 ```
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 END-OF-DAY REPORT — [Date]
-Mode: READ-ONLY
+Mode: READ-ONLY  (Mode: READ-ONLY-DEGRADED if Phase D fired)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+[If degraded, insert this block immediately below the header:
+🔌 CONNECTIVITY STATUS
+Alpaca: OFFLINE | Failure class: [failure_class] | Discovery attempts: [N]/7 | Render status: [up/down/unprobed]
+- If render_status = up: Runtime/connector issue, NOT Render. Reconnect at https://claude.ai/settings/connectors
+- If render_status = down: Render endpoint unreachable. Check dashboard for alpaca-mcp-server-8zw5
+- If render_status = unprobed: WebFetch unavailable; could not distinguish runtime vs Render
+Position values below are approximate (qty × current_quote). No fills data, no stop-out detection. Cash frozen at this morning's open.
+Tomorrow's morning agent will see DEGRADED in this email's subject — it will treat this snapshot as approximate, not authoritative.]
 
 📊 ACCOUNT
 Equity: $X  {sparkline}  Day: {sign}{abs%}%
@@ -406,19 +464,24 @@ Exit.
 
 ## Appendix A — Failure Modes (non-fatal, report still ships)
 
-The EOD agent ships the report even when individual steps fail. Log the failure in the email body's relevant section and continue.
+The EOD agent ships the report even when individual steps fail. Log the failure in the email body's relevant section and continue. Updated 2026-05-10 to distinguish fail classes that go to Phase D vs. ones that just degrade specific sections.
 
-| Failure | Report impact | Continue? |
-|---------|---------------|-----------|
-| Alpaca unreachable after retry | Report omits live data, reconciliation skipped | Yes — ship minimal report noting outage |
-| Morning email not found | Reconciliation section shows "no morning email parsed" | Yes |
-| Midday email not found | Same, for midday section | Yes |
-| `get_portfolio_history` fails | Skip since-inception curve, use `last_equity` for day P/L | Yes |
-| Signal research timeout | Omit SIGNAL_RESULT block, note "skipped" | Yes |
-| Signal research errors mid-search | Same as timeout | Yes |
-| Gmail create_draft fails | Log full body to trigger output | **Fatal for reporting; continue to research if not yet done** |
+| Failure | Triggers Phase D? | Report impact | Continue? |
+|---------|-------------------|---------------|-----------|
+| Step 1 Phase A discovery exhausted (7 attempts) | Yes | DEGRADED report from morning email + current quotes; no reconciliation; no post-mortems; signal research still runs | Yes |
+| Step 1 Phase A Render probe → "down" | Yes | Same as above | Yes |
+| Step 1 Phase B `get_clock` fails twice | Yes | Same as above | Yes |
+| Step 1 Phase D itself fails (no morning email + no quotes) | No (true standdown) | True standdown — minimal email noting both failures | Exit |
+| Morning email not found (live mode only — Phase D requires it) | No | Reconciliation section shows "no morning email parsed" | Yes |
+| Midday email not found | No | Same, for midday section | Yes |
+| `get_portfolio_history` fails | No | Skip since-inception curve, use `last_equity` for day P/L | Yes |
+| Signal research timeout | No | Omit SIGNAL_RESULT block, note "skipped" | Yes |
+| Signal research errors mid-search | No | Same as timeout | Yes |
+| Gmail create_draft fails AND verification confirms no draft landed | No | Log full body to trigger output, EXIT non-zero so trigger UI shows red | **Fatal for reporting; the silent-fake-success failure mode IS the bug we're catching** |
 
-Fatal errors (abandon and exit): none. EOD should always ship something.
+**Fatal errors (abandon and exit):** Step 1 Phase D failing entirely (no morning email + no live quotes), and Gmail draft-create + post-verify both failing. Everything else degrades gracefully.
+
+The "EOD should always ship something" principle holds with one caveat: a confirmed-failed Gmail post-verify is fatal because shipping nothing-but-claiming-success is worse than visibly red in the trigger UI. See Step 8 post-create verification.
 
 ## Appendix B — Signal Target Rotation
 
