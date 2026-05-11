@@ -35,7 +35,9 @@ If research errors or times out, skip to email assembly and ship the report. Mor
 
 ## Kill switch note
 
-EOD does NOT check for the `TRADING-PAUSED` kill switch. The kill switch pauses trading; EOD only reports. Reports are always useful — run every day regardless.
+EOD does NOT check either kill path (repo file `kill-switch/state.txt` OR Gmail `TRADING-PAUSED` label). Both paths exist to pause TRADING; EOD only reports. Reports are always useful — especially during incidents when Dylan most needs visibility. Run every day regardless of kill switch state.
+
+If you want EOD to also pause during a kill (e.g., suspected agent compromise), pause the trigger directly in claude.ai/code/scheduled UI. That kills all activity from this agent, not just trading.
 
 ---
 

@@ -69,15 +69,32 @@ Midday runs at **12:00 PM ET** — 2.5 hours into the session. Its job is **reac
 
 ---
 
-## Step 0 — Kill Switch Check
+## Step 0 — Kill Switch Check (two paths, either engaged → standdown)
 
-Search Gmail for `label:TRADING-PAUSED newer_than:2d`.
+Two independent kill paths. Check the repo file first (primary), then Gmail label (secondary). Either engaged → standdown. **In execute mode this check is especially critical — past Step 0, the agent has authority to place real orders.**
 
-If ANY match found:
-- Do not proceed with any research, analysis, or order calls.
-- Create a Gmail draft titled `Midday Brief — [Date] — STANDING DOWN (kill switch active)`.
-- Body: one line stating "Kill switch detected. Remove the `TRADING-PAUSED` label to resume."
-- Exit.
+**Step 0a — Repo kill-switch file (primary path).**
+1. Fetch via Bash + curl (10s timeout):
+   ```
+   curl -s --max-time 10 https://raw.githubusercontent.com/Dylanxmt/finance-playbooks/main/kill-switch/state.txt
+   ```
+2. If fetch succeeds: parse line 1 (trimmed of whitespace).
+   - If line 1 is exactly `PAUSED`: standdown immediately, do NOT proceed to any order tool. Create draft titled `Midday Brief — [Date] — STANDING DOWN (repo kill switch ENGAGED — execute mode aborted)`. Body: include the full file contents so Dylan sees the metadata footer. Add a line "Disengage at: https://github.com/Dylanxmt/finance-playbooks/blob/main/kill-switch/state.txt". Exit.
+   - If line 1 is `ARMED` or anything else: proceed to Step 0b.
+3. If fetch fails: sleep 5s, retry once.
+4. If both fetch attempts fail: set `repo_kill_reachable = false`, log the failure, proceed to Step 0b.
+
+**Step 0b — Gmail label (secondary path).**
+5. Search Gmail for `label:TRADING-PAUSED newer_than:2d`.
+6. If ANY match found:
+   - Standdown, do NOT proceed to any order tool. Create draft titled `Midday Brief — [Date] — STANDING DOWN (Gmail kill label active — execute mode aborted)`.
+   - Body: one line stating "Kill switch detected via Gmail label. Remove the `TRADING-PAUSED` label to resume."
+   - Exit.
+7. If the Gmail search itself errors: set `gmail_kill_reachable = false`, log the failure, continue.
+
+**Step 0c — Fail-closed if both paths unreachable.**
+8. If `repo_kill_reachable = false` AND `gmail_kill_reachable = false`: stand down. **Execute mode fails closed harder than dry-run** — without confirmed safety signal, do NOT place orders. Subject `Midday Brief — [Date] — STANDING DOWN (both kill paths unreachable — execute mode fail-closed)`. Body explains both failures so Dylan can investigate before next run.
+9. If either path is reachable and reports armed/no-label, proceed to Step 1.
 
 ## Step 1 — Health Check (discovery-tolerant + degraded-mode fallback)
 

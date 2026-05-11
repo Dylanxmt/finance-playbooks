@@ -1,0 +1,15 @@
+ARMED
+# Line 1 above is the load-bearing state field. Agents parse line 1 only.
+# Lines starting with # are comments — agents ignore them.
+#
+# To engage the kill switch: change line 1 to PAUSED, commit, push.
+# To disengage: change line 1 back to ARMED, commit, push.
+# All three agents will pick up the change on their next scheduled run (no trigger config edit needed).
+#
+# This is the PRIMARY kill switch. The Gmail TRADING-PAUSED label remains as a secondary path.
+# Either path engaged will cause the trading agents (morning, midday) to standdown.
+# EOD ignores both kill paths — read-only reports are always useful, especially during incidents.
+#
+Last changed: 2026-05-10
+Changed by: Initial creation
+Reason: Establishing the second-path kill switch (hardening item 7)
