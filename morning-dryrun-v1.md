@@ -76,7 +76,9 @@ The Alpaca MCP connector lives behind two layers: (a) the Render-hosted MCP serv
 
 **Phase A — wait for discovery (priming + exponential backoff).**
 1. Sleep 45 seconds before any Alpaca call. Connector tools may not be registered in the runtime's tool index until discovery completes; calling them too early returns "no matching tools" and burns the budget.
-2. Run up to 7 ToolSearch attempts. Each attempt: query `"select:mcp__alpaca__get_clock"`, `max_results: 1`. If `mcp__alpaca__get_clock` appears in the returned schema list, proceed to Phase B.
+2. Run up to 7 ToolSearch attempts. Each attempt: query `"select:mcp__Alpaca-Trading__get_clock,mcp__alpaca__get_clock"`, `max_results: 2` — these are the two known Alpaca connector prefix conventions (cloud HTTP connector uses `mcp__Alpaca-Trading__*`, local stdio uses `mcp__alpaca__*`). If EITHER tool schema is returned, capture which prefix matched as `alpaca_tool_prefix` (use it for ALL subsequent Alpaca calls in this run — every `mcp__alpaca__*` reference later in this playbook should be read as the captured prefix), and proceed to Phase B.
+
+   **DO NOT fall back to keyword search** (`"Alpaca"`, `"trading"`, `"stock order"`, etc.). Keyword ToolSearch cannot return tools that have not completed runtime registration — it reports 0 matches and burns the budget without ever succeeding. Only `select:` queries against exact tool names can find a registered-but-not-yet-indexed connector. If both candidate prefixes return empty across all 7 attempts, the connector has not registered for this run — go to Phase D.
 3. Backoff schedule (sleep AFTER a failed attempt, BEFORE the next):
    - After attempt 1: sleep 10s
    - After attempt 2: sleep 20s
@@ -96,7 +98,7 @@ Use `WebFetch` on `https://alpaca-mcp-server-8zw5.onrender.com/` with a 15s time
 Capture and persist for the email body: `discovery_attempts_made` (1-7), `render_status` ("up" / "down" / "unprobed" / "n/a"), `failure_class`.
 
 **Phase B — probe Alpaca.**
-5. Call `mcp__alpaca__get_clock`. Allow up to 30s.
+5. Call `get_clock` using the `alpaca_tool_prefix` captured in Phase A (i.e., `{alpaca_tool_prefix}__get_clock`). Allow up to 30s.
 6. If it fails or times out, wait 30s and retry once.
 7. If both attempts fail *despite tools being registered*: this is a separate failure class — Alpaca API or auth, not connector discovery. Set `alpaca_available = false`, `failure_class = "alpaca_api_error"`. Capture the error text from each attempt. Go to Phase D.
 
@@ -113,7 +115,7 @@ Capture and persist for the email body: `discovery_attempts_made` (1-7), `render
 **Phase D — degraded-mode fallback (replaces pure standdown for discovery/probe failures).**
 Entered only when `alpaca_available = false` from Phase A or B. Phase C account-block / market-closed failures bypass this and go to true standdown.
 
-12. Search Gmail: `from:{{RECIPIENT_EMAIL}} subject:"EOD Report" newer_than:5d`. Take the most recent match (yesterday's, in the typical case — extends to 5 days for long weekends / holiday gaps).
+12. Search Gmail: `in:draft from:{{RECIPIENT_EMAIL}} subject:"EOD Report" newer_than:5d`. Take the most recent match (yesterday's, in the typical case — extends to 5 days for long weekends / holiday gaps). **The `in:draft` flag is load-bearing** — agent reports are saved as drafts (never sent), and the Gmail connector's `search_threads` tool excludes drafts by default. Without `in:draft`, this query returns empty even when the EOD report exists.
 13. Call `get_thread` with `messageFormat: FULL_CONTENT`. Parse the EOD body for:
     - Portfolio table rows: ticker, qty, avg cost, close price.
     - Account summary line: `equity`, `cash`, `buying_power` — label these "as of [EOD date]".
@@ -144,7 +146,7 @@ Entered only when `alpaca_available = false` from Phase A or B. Phase C account-
 
 The EOD agent runs structured signal research each weekday and embeds a machine-readable block at the bottom of its email. Load the most recent one so morning decisions benefit from last night's research.
 
-1. Search Gmail: `from:{{RECIPIENT_EMAIL}} subject:"EOD Report" newer_than:3d` — take the most recent matching message. Call `get_thread` with `messageFormat: FULL_CONTENT` to retrieve the body (snippets are truncated and will miss the SIGNAL_RESULT block).
+1. Search Gmail: `in:draft from:{{RECIPIENT_EMAIL}} subject:"EOD Report" newer_than:3d` — take the most recent matching message. Call `get_thread` with `messageFormat: FULL_CONTENT` to retrieve the body (snippets are truncated and will miss the SIGNAL_RESULT block). **The `in:draft` flag is required** because reports are persisted as drafts; Gmail search excludes drafts by default.
 2. Parse the body for the block delimited by `<!-- SIGNAL_RESULT_START` and `SIGNAL_RESULT_END -->`.
 3. Extract fields: `DECISION`, `CHANNEL`, `SIGNAL_ID`, `SIGNAL_NAME`, `PERFORMANCE`, `CREATIVITY`, `CHECK_RULE`, `FINDING_SUMMARY`. Each field is on its own line in `LABEL: value` format — no embedded newlines inside a value.
 4. Determine active signals:

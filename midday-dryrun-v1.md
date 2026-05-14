@@ -92,7 +92,9 @@ The Alpaca MCP connector lives behind two layers: (a) the Render-hosted MCP serv
 
 **Phase A — wait for discovery (priming + exponential backoff).**
 1. Sleep 45 seconds before any Alpaca call. Connector tools may not be registered in the runtime's tool index until discovery completes; calling them too early returns "no matching tools" and burns the budget.
-2. Run up to 7 ToolSearch attempts. Each attempt: query `"select:mcp__alpaca__get_clock"`, `max_results: 1`. If `mcp__alpaca__get_clock` appears in the returned schema list, proceed to Phase B.
+2. Run up to 7 ToolSearch attempts. Each attempt: query `"select:mcp__Alpaca-Trading__get_clock,mcp__alpaca__get_clock"`, `max_results: 2` — these are the two known Alpaca connector prefix conventions (cloud HTTP connector uses `mcp__Alpaca-Trading__*`, local stdio uses `mcp__alpaca__*`). If EITHER tool schema is returned, capture which prefix matched as `alpaca_tool_prefix` (use it for ALL subsequent Alpaca calls in this run — every `mcp__alpaca__*` reference later in this playbook should be read as the captured prefix), and proceed to Phase B.
+
+   **DO NOT fall back to keyword search** (`"Alpaca"`, `"trading"`, `"stock order"`, etc.). Keyword ToolSearch cannot return tools that have not completed runtime registration — it reports 0 matches and burns the budget without ever succeeding. Only `select:` queries against exact tool names can find a registered-but-not-yet-indexed connector. If both candidate prefixes return empty across all 7 attempts, the connector has not registered for this run — go to Phase D.
 3. Backoff schedule (sleep AFTER a failed attempt, BEFORE the next):
    - After attempt 1: sleep 10s
    - After attempt 2: sleep 20s
@@ -112,7 +114,7 @@ Use `WebFetch` on `https://alpaca-mcp-server-8zw5.onrender.com/` with a 15s time
 Capture and persist for the email body: `discovery_attempts_made` (1-7), `render_status` ("up" / "down" / "unprobed" / "n/a"), `failure_class`.
 
 **Phase B — probe Alpaca.**
-5. Call `mcp__alpaca__get_clock`. Allow up to 30s.
+5. Call `get_clock` using the `alpaca_tool_prefix` captured in Phase A (i.e., `{alpaca_tool_prefix}__get_clock`). Allow up to 30s.
 6. If it fails or times out, wait 30s and retry once.
 7. If both attempts fail *despite tools being registered*: this is a separate failure class — Alpaca API or auth, not connector discovery. Set `alpaca_available = false`, `failure_class = "alpaca_api_error"`. Capture the error text from each attempt. Go to Phase D.
 
@@ -129,7 +131,7 @@ Capture and persist for the email body: `discovery_attempts_made` (1-7), `render
 **Phase D — degraded-mode fallback (replaces pure standdown for discovery/probe failures).**
 Entered only when `alpaca_available = false` from Phase A or B. Phase C account-block failures bypass this and go to true standdown.
 
-12. Search Gmail: `from:{{RECIPIENT_EMAIL}} subject:"EOD Report" newer_than:5d`. Take the most recent match.
+12. Search Gmail: `in:draft from:{{RECIPIENT_EMAIL}} subject:"EOD Report" newer_than:5d`. Take the most recent match. **The `in:draft` flag is load-bearing** — agent reports persist as drafts and `search_threads` excludes drafts by default.
 13. Call `get_thread` with `messageFormat: FULL_CONTENT`. Parse the EOD body for:
     - Portfolio table rows: ticker, qty, avg cost, close price.
     - Account summary line: `equity`, `cash`, `buying_power` — label these "as of [EOD date]".
@@ -157,9 +159,9 @@ The morning agent drafted a plan at ~9:00 AM. Load it so midday can reconcile ag
 
 1. Search Gmail using **this exact query**:
    ```
-   from:{{RECIPIENT_EMAIL}} (subject:"Morning Trading Plan" OR subject:"Morning Brief") newer_than:1d
+   in:draft from:{{RECIPIENT_EMAIL}} (subject:"Morning Trading Plan" OR subject:"Morning Brief") newer_than:1d
    ```
-   Take the most recent match (today's).
+   Take the most recent match (today's). **The `in:draft` flag is required** — morning reports are saved as drafts (never sent), and the Gmail connector's `search_threads` excludes drafts by default. Without `in:draft`, this query returns empty even when today's morning report exists.
 2. Call `get_thread` with `threadId` = top result's thread id and `messageFormat: FULL_CONTENT`. **Do NOT rely on the search snippet — it truncates the body and will miss the rationale blocks.**
 3. From the returned body, extract:
    - **Proposed tickers**: any ticker in a "💼 TRADES PROPOSED" block. The ticker appears on the second line of each rationale block, format `Ticker: XYZ  |  Side: ...`. Record each ticker + authority (a/b/c/d) + proposed qty + limit price.
@@ -522,6 +524,8 @@ Keep visuals lighter when the email is monitoring-only — the standardized acco
 **Fallback if plaintext is empty:** if `plaintextBody` returns only a shell string, record `morning_plan_status = unparseable` and proceed with extra caution — do not assume morning proposed anything specific. Treat it like a missing morning email.
 
 **Sender robustness:** the Gmail query `from:{{RECIPIENT_EMAIL}}` covers the case where the connector sends drafts from the user's personal account. If drafts ever start appearing from a different sender (work Google account, agent-service account), widen the filter — but ALWAYS pin a sender to avoid matching unrelated emails with similar subjects.
+
+**Draft visibility — `in:draft` is mandatory** (added 2026-05-14 after 6 consecutive degraded sessions traced to this bug): the Gmail connector's `search_threads` tool excludes drafts by default. Since the trading agents persist all reports as drafts (never send), every cross-agent email lookup MUST include `in:draft` in the query string. A query of `from:me subject:"Morning Brief" newer_than:1d` will silently return zero results even when the morning draft exists; `in:draft from:me subject:"Morning Brief" newer_than:1d` returns it correctly. This is non-obvious because the agent that creates the draft and the agent that reads it use the same Gmail connector, but the draft-exclusion default makes the read fail. If a future version sends emails instead of drafting them, drop the `in:draft` flag (or make it `(in:draft OR in:sent)`).
 
 The morning email body contains these sections that matter to midday:
 - `💼 TRADES PROPOSED ([N] total)` — followed by rationale blocks with `Ticker: XYZ` on the second line of each block. Extract all unique tickers.

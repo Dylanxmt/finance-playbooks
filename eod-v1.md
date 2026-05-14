@@ -51,7 +51,9 @@ Failures at any phase below set `alpaca_available = false` and skip live-data st
 
 **Phase A — wait for discovery (priming + exponential backoff).**
 1. Sleep 45 seconds before any Alpaca call. Connector tools may not be registered in the runtime's tool index until discovery completes; calling them too early returns "no matching tools" and burns the budget.
-2. Run up to 7 ToolSearch attempts. Each attempt: query `"select:mcp__alpaca__get_clock"`, `max_results: 1`. If `mcp__alpaca__get_clock` appears in the returned schema list, proceed to Phase B.
+2. Run up to 7 ToolSearch attempts. Each attempt: query `"select:mcp__Alpaca-Trading__get_clock,mcp__alpaca__get_clock"`, `max_results: 2` — these are the two known Alpaca connector prefix conventions (cloud HTTP connector uses `mcp__Alpaca-Trading__*`, local stdio uses `mcp__alpaca__*`). If EITHER tool schema is returned, capture which prefix matched as `alpaca_tool_prefix` (use it for ALL subsequent Alpaca calls in this run — every `mcp__alpaca__*` reference later in this playbook should be read as the captured prefix), and proceed to Phase B.
+
+   **DO NOT fall back to keyword search** (`"Alpaca"`, `"trading"`, `"stock order"`, etc.). Keyword ToolSearch cannot return tools that have not completed runtime registration — it reports 0 matches and burns the budget without ever succeeding. Only `select:` queries against exact tool names can find a registered-but-not-yet-indexed connector. If both candidate prefixes return empty across all 7 attempts, the connector has not registered for this run — go to Phase D.
 3. Backoff schedule (sleep AFTER a failed attempt, BEFORE the next):
    - After attempt 1: sleep 10s
    - After attempt 2: sleep 20s
@@ -71,7 +73,7 @@ Use `WebFetch` on `https://alpaca-mcp-server-8zw5.onrender.com/` with a 15s time
 Capture and persist for the email body: `discovery_attempts_made` (1-7), `render_status`, `failure_class`.
 
 **Phase B — probe Alpaca.**
-5. Call `mcp__alpaca__get_clock`. Allow up to 30s.
+5. Call `get_clock` using the `alpaca_tool_prefix` captured in Phase A (i.e., `{alpaca_tool_prefix}__get_clock`). Allow up to 30s.
 6. If it fails or times out, wait 30s and retry once.
 7. If both attempts fail *despite tools being registered*: set `alpaca_available = false`, `failure_class = "alpaca_api_error"` (include error text). Go to Phase D.
 
@@ -83,7 +85,7 @@ Capture and persist for the email body: `discovery_attempts_made` (1-7), `render
 **Phase D — degraded-mode fallback.**
 Entered only when `alpaca_available = false` from Phase A or B. Phase D produces a degraded EOD report using today's morning email's portfolio snapshot + current quotes. Still ships — true standdown only when fallback also fails.
 
-11. Search Gmail: `from:{{RECIPIENT_EMAIL}} (subject:"Morning Trading Plan" OR subject:"Morning Brief") newer_than:1d`. Take today's match.
+11. Search Gmail: `in:draft from:{{RECIPIENT_EMAIL}} (subject:"Morning Trading Plan" OR subject:"Morning Brief") newer_than:1d`. Take today's match. **The `in:draft` flag is load-bearing** — morning reports are saved as drafts and `search_threads` excludes drafts by default.
 12. Call `get_thread` with `messageFormat: FULL_CONTENT`. Parse the morning body for:
     - Portfolio table rows: ticker, qty, avg cost, opening price.
     - Account summary: morning's `equity`, `cash`, `buying_power` (label "as of morning, [time]").
@@ -113,9 +115,9 @@ Pull the day's narrative from the agents that already ran:
 
 1. **Morning:** search Gmail with
    ```
-   from:{{RECIPIENT_EMAIL}} (subject:"Morning Trading Plan" OR subject:"Morning Brief") newer_than:1d
+   in:draft from:{{RECIPIENT_EMAIL}} (subject:"Morning Trading Plan" OR subject:"Morning Brief") newer_than:1d
    ```
-   Take the most recent. Call `get_thread` with `messageFormat: FULL_CONTENT`. Extract from `plaintextBody`:
+   Take the most recent. Call `get_thread` with `messageFormat: FULL_CONTENT`. **The `in:draft` flag is required** — morning reports persist as drafts; Gmail's `search_threads` excludes drafts by default. Extract from `plaintextBody`:
    - Proposed tickers + authority
    - Considered-but-rejected tickers
    - Flagged positions
@@ -123,7 +125,7 @@ Pull the day's narrative from the agents that already ran:
    - **If `plaintextBody` is empty or contains only a shell string like "see HTML version":** set `morning_parse_status = unparseable`. Do NOT fail. Fall back to the `client_order_id` prefix convention (Step 4) for reconciliation.
 2. **Midday:** search Gmail with
    ```
-   from:{{RECIPIENT_EMAIL}} subject:"Midday Brief" newer_than:1d
+   in:draft from:{{RECIPIENT_EMAIL}} subject:"Midday Brief" newer_than:1d
    ```
    Take the most recent. Extract (same way):
    - Reactive trades proposed (if any)
